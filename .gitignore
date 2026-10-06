@@ -1,0 +1,44 @@
+# Local builds, installers, diagnostics, backups, and preview captures.
+/.build/
+/dist/
+/work/
+.DS_Store
+*.dSYM/
+*.app/
+*.dmg
+*.log
+
+# Generated from Resources/Artwork by scripts/build.sh.
+/Resources/AppIcon.icns
+/Resources/MenuBarIcon*.png
+
+# Local editor state.
+/.swiftpm/
+/.idea/
+/.vscode/
+*.xcuserstate
+xcuserdata/
+__pycache__/
+*.pyc
+
+# Credentials and signing material must never be committed.
+.env
+.env.*
+.envrc
+.git-credentials
+.netrc
+.npmrc
+.pypirc
+.aws/
+.ssh/
+secrets/
+credentials/
+credentials.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+*.provisionprofile

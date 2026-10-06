@@ -1,0 +1,43 @@
+VOLUME MIXER 1.2.0 — PERSONAL MAC BUILD
+
+INSTALL
+1. Drag Volume Mixer into the Applications folder beside it.
+2. Open the installed Volume Mixer app. A fader icon appears in the menu bar.
+3. Choose Enable app control (or Resume control), then adjust a playing app.
+4. If macOS asks for System Audio Recording access, choose Allow.
+
+The sliders affect only the named app. Mute keeps the saved volume for later.
+Use Play through below each slider to choose its output device. System output
+follows the Mac's current output. A named device is remembered across reconnects.
+Pause control and Quit restore each app's original volume and output.
+
+UPDATING
+Quit the old Volume Mixer from its gear menu, then drag the new copy to the same
+Applications folder and choose Replace. Open the new installed app. Your saved
+volumes and output choices are preserved. The gear menu shows Version 1.2.0.
+This update adds the new app/menu-bar icons and compact native panel. The audio
+engine is unchanged from 1.1.2. Your saved levels and output choices are retained. macOS may ask for audio access again.
+Click a slider, then use arrow keys for 1% changes or Shift–arrow for 10% changes.
+Escape or a click outside closes the panel.
+
+AUDIO CHECK
+With control paused, gear > Check audio engine runs an optional offline check.
+It uses synthetic audio in memory without capturing or playing hardware audio.
+
+UNINSTALL
+Open the gear menu and choose Uninstall Volume Mixer. Confirm to restore audio,
+remove saved settings and the login item, move the app to Trash, and quit.
+Empty Trash when you want to permanently remove the app.
+Your source project and this downloaded disk image are not deleted.
+macOS may retain its own permission/history entry after removal.
+
+This local build is for this Apple Silicon Mac with macOS 27. It is ad-hoc signed,
+not publicly notarized. It has no audio driver, daemon, network service, analytics,
+or recording feature. Audio samples remain in memory on your Mac.
+
+If a slider reports Control unavailable, click that text for the specific reason
+and Retry control. Failed routes stay bypassed until you retry or the route changes.
+If an output is disconnected, reconnect it or choose System
+output in Play through. Pause control if playback doesn't sound correct.
+Protected audio or unsupported device formats may bypass control; the app's
+original audio remains available.

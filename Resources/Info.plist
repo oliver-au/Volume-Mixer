@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>local.oliver.VolumeMixer</string>
+    <key>CFBundleName</key><string>Volume Mixer</string>
+    <key>CFBundleDisplayName</key><string>Volume Mixer</string>
+    <key>CFBundleExecutable</key><string>VolumeMixer</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>1.2.0</string>
+    <key>CFBundleVersion</key><string>5</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>27.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSAudioCaptureUsageDescription</key><string>Volume Mixer needs access to app playback to adjust each app's volume. Audio stays in memory on this Mac and is never recorded or uploaded.</string>
+    <key>NSHumanReadableCopyright</key><string>Personal local build, 2026.</string>
+</dict></plist>
