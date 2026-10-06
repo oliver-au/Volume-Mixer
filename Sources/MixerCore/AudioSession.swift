@@ -157,7 +157,15 @@ public struct PlaybackLayout {
               (8000...384000).contains(last.format.mSampleRate) else {
             throw AudioFailure("\(destination.name) reported an unsupported audio sample rate (\(last.format.mSampleRate) → \(rate) Hz).")
         }
-        return PlaybackLayout(physicalChannels: inputs.dropLast().reduce(0) { $0 + $1.channels },
+        var physicalChannels: UInt32 = 0
+        for input in inputs.dropLast() {
+            let (sum, overflow) = physicalChannels.addingReportingOverflow(input.channels)
+            guard !overflow, sum <= UInt32.max - tap.channels else {
+                throw AudioFailure("The audio service returned an invalid channel layout.")
+            }
+            physicalChannels = sum
+        }
+        return PlaybackLayout(physicalChannels: physicalChannels,
                               inputSampleRate: last.format.mSampleRate, outputSampleRate: rate)
     }
     public static func validateCapture(inputs: [AudioStreamInfo], outputs: [AudioStreamInfo], tap: AudioStreamInfo) throws -> AudioStreamInfo {

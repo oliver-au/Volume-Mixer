@@ -87,11 +87,14 @@ public struct AudioApplication: Sendable {
         processObjects.sorted().map(String.init).joined(separator: ",") + ":" +
             lifetimes.map { "\($0.pid):\($0.startTime)" }.sorted().joined(separator: ",")
     }
+    public func owns(object: AudioObjectID, pid: Int32, startTime: UInt64) -> Bool {
+        processObjects.contains(object) && lifetimes.contains { $0.pid == pid && $0.matches(startTime: startTime) }
+    }
 }
 
 public enum ProcessCatalog {
     private static func text<T>(_ field: inout T) -> String {
-        withUnsafePointer(to: &field) { $0.withMemoryRebound(to: CChar.self, capacity: MemoryLayout<T>.size) { String(cString: $0) } }
+        withUnsafeBytes(of: &field) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
     }
     private static func identity(pid: pid_t, bundleID: String, lifetime: inout ProcessLifetime?) -> AppIdentity {
         var raw = VMProcessInfo()
@@ -134,17 +137,23 @@ public enum ProcessCatalog {
         }
         return app.lifetimes.contains { $0.matches(startTime: VMProcessStartTime($0.pid)) }
     }
-    public static func scan() throws -> [AudioApplication] {
+    public static func scan(keeping previous: [AudioApplication] = []) throws -> [AudioApplication] {
         let objects = try HAL.objects(HAL.system, kAudioHardwarePropertyProcessObjectList)
+        var known: [AudioObjectID: AudioApplication] = [:]
+        for app in previous { for object in app.processObjects { known[object] = app } }
         var apps: [String: AudioApplication] = [:]
         for object in objects {
             guard let rawPID = try? HAL.scalar(object, kAudioProcessPropertyPID) else { continue }
             let pid = pid_t(bitPattern: rawPID)
             guard pid > 0 && pid != ProcessInfo.processInfo.processIdentifier else { continue }
             let active = (try? HAL.scalar(object, kAudioProcessPropertyIsRunningOutput)) == 1
-            let devices = (try? HAL.objects(object, kAudioProcessPropertyDevices, scope: kAudioObjectPropertyScopeOutput)) ?? []
-            // Input-only processes never belong in a playback mixer.
-            guard active || !devices.isEmpty else { continue }
+            var devices = (try? HAL.objects(object, kAudioProcessPropertyDevices, scope: kAudioObjectPropertyScopeOutput)) ?? []
+            // An already identified playback process can retain its tap while idle,
+            // even when it temporarily exposes no streams. Never retain a reused PID.
+            if !active && devices.isEmpty {
+                guard let prior = known[object], prior.owns(object: object, pid: pid, startTime: VMProcessStartTime(pid)) else { continue }
+                devices = Array(prior.outputDevices)
+            }
             let bundle = (try? HAL.string(object, kAudioProcessPropertyBundleID)) ?? ""
             guard bundle != Preferences.bundleID else { continue }
             var lifetime: ProcessLifetime?

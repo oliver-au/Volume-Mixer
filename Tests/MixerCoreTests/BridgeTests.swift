@@ -3,6 +3,55 @@ import CoreAudio
 import AudioDSP
 
 final class BridgeTests {
+    func testStallBacklogRecoversWithSmoothCrossfadeAcrossWraps() throws {
+        for (rate, inputChannels, outputChannels): (Double, UInt32, UInt32) in
+            [(48000, 2, 2), (44100, 1, 2), (24000, 2, 1)] {
+            let bridge = try require(VMCreateBridge(0.5, rate, inputChannels, outputChannels))
+            defer { VMDestroyBridge(bridge) }
+            let initial = Buffers(channels: [Int(inputChannels)], frames: 4096, fill: 0.8)
+            VMBridgeCapture(bridge, initial.list.unsafePointer)
+            let output = Buffers(channels: Array(repeating: 1, count: Int(outputChannels)), frames: 64)
+            VMBridgeRender(bridge, 64, output.list.unsafeMutablePointer)
+            var previous: Float = 0.4
+            for cycle in 0..<12 {
+                let sample: Float = cycle % 2 == 0 ? -0.8 : 0.8
+                let stalled = Buffers(channels: [Int(inputChannels)], frames: Int(rate * 0.5), fill: sample)
+                VMBridgeCapture(bridge, stalled.list.unsafePointer)
+                for _ in 0..<4 {
+                    VMBridgeRender(bridge, 64, output.list.unsafeMutablePointer)
+                    for value in output.samples() {
+                        checkLess(abs(value - previous), 0.01)
+                        previous = value
+                    }
+                    if outputChannels == 2 { checkEqual(Array(output.samples(0)), Array(output.samples(1))) }
+                    checkLessEqual(VMBridgeQueuedFrames(bridge), VMBridgeTargetFrames(bridge))
+                }
+                checkEqual(previous, sample * 0.5, accuracy: 0.00001)
+            }
+            checkGreater(VMBridgeDroppedFrames(bridge), 0)
+            checkEqual(VMBridgeFault(bridge), 0); checkEqual(VMBridgeUnderruns(bridge), 0)
+            VMBridgeSetGain(bridge, 0)
+            for _ in 0..<8 { VMBridgeRender(bridge, 64, output.list.unsafeMutablePointer) }
+            checkTrue(output.samples().allSatisfy { $0 == 0 })
+        }
+    }
+    func testRepeatedStallsDuringCrossfadeRemainContinuous() throws {
+        let bridge = try require(VMCreateBridge(1, 48000, 1, 1)); defer { VMDestroyBridge(bridge) }
+        let initial = Buffers(channels: [1], frames: 4096, fill: 0.8)
+        VMBridgeCapture(bridge, initial.list.unsafePointer)
+        let output = Buffers(channels: [1], frames: 32)
+        VMBridgeRender(bridge, 32, output.list.unsafeMutablePointer)
+        var previous: Float = 0.8
+        for cycle in 0..<12 {
+            let packet = Buffers(channels: [1], frames: 24000, fill: cycle % 2 == 0 ? -0.8 : 0.8)
+            VMBridgeCapture(bridge, packet.list.unsafePointer)
+            VMBridgeRender(bridge, 32, output.list.unsafeMutablePointer)
+            for sample in output.samples() {
+                checkLess(abs(sample - previous), 0.02); previous = sample
+            }
+        }
+        checkEqual(VMBridgeFault(bridge), 0); checkEqual(VMBridgeUnderruns(bridge), 0)
+    }
     func testConcurrentCaptureAndPlayback() throws {
         let bridge = try require(VMCreateBridge(0.5, 48000, 2, 2)); defer { VMDestroyBridge(bridge) }
         let group = DispatchGroup(), result = ConcurrentResult()
@@ -11,7 +60,8 @@ final class BridgeTests {
             let input = Buffers(channels: [2], frames: 256)
             var written = 0
             while written < total, Date() < deadline {
-                if VMBridgeQueuedFrames(bridge) > 32768 { Thread.sleep(forTimeInterval: 0.0001); continue }
+                // Stay below deliberate backlog recovery; this test checks lossless ordering.
+                if VMBridgeQueuedFrames(bridge) > 8192 { Thread.sleep(forTimeInterval: 0.0001); continue }
                 for i in 0..<256 {
                     let value = Float((written + i) % 997) / 1000
                     input.samples()[2*i] = value; input.samples()[2*i + 1] = -value

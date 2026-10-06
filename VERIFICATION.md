@@ -1,36 +1,182 @@
 # Volume Mixer verification
 
-The packaged release is **1.2.0 (5)**, a local Apple Silicon build for macOS 27.
-This repository also includes a source cleanup performed after that package was
-built. The cleanup removes unused bridge callback counters, session signature
-fields, unused row peak telemetry and an unused shutdown option. Gain processing,
-resampling, routing and error-recovery behavior are unchanged by the cleanup.
+The current source is **1.2.3 (8)**, a local Apple Silicon build for macOS 27.
+The security hardening in 1.2.1 and a subsequent defect review were checked on
+7 October 2026. The installed app was not replaced or launched during this review.
 
 ## Automated checks
 
 Run `scripts/test.sh` with Apple's Command Line Tools and the macOS 27 SDK.
-The suite covers 42 scenarios:
+The suite covers 60 scenarios:
 
 - Gain, attenuation, mute/unmute ramps, channel mapping and input exclusion.
 - Bounded audio queues, variable callback sizes, ring wraps and concurrent ordering.
 - App/helper and Wine identity, separate bottles and PID reuse.
+- Malformed object-list sizes, channel overflow, and truncated or oversized Wine metadata.
 - Saved levels and routes, isolated preference cleanup and symlink-safe file cleanup.
 - Independent sessions, explicit output routing, disconnected devices, sleep/wake,
   pause/shutdown and latched failure recovery using simulated hardware.
+- Default-output changes preserve unaffected explicit routes and do not retry
+  failures on unrelated devices; system-following routes still move correctly.
+- Hidden idle-app attenuation, rapid slider updates, batched preference writes,
+  dragging across 100%, delayed bypass and flushing on pause/shutdown/reset.
+- Bounded transient-discovery recovery, per-route health checks, retained output
+  choices and connecting states for newly discovered apps.
+- Repeated 500 ms capture backlogs, crossfades spanning render calls and ring wraps,
+  interrupted crossfades, gain/mute preservation and mono/stereo mapping.
+- Output symbols from terminal/transport metadata and lifetime-safe idle retention.
 - Apple-engine offline conversion, mono/anti-alias behavior, independent gain/mute
   and a ten-minute simulated clock-drift run when Audio Units are available.
 
-The last packaged-release run had **38 passes, 4 skips and no failed assertions**.
-The repository cleanup was rechecked on 7 October 2026 with the same result;
-its release build and strict ad-hoc signature verification also passed.
-The four skips were the Apple-engine scenarios: the command environment could not
-resolve the required Audio Units. These skips are not successful playback tests.
-The unavailable-component failure path did pass. The earlier audio-engine suite
-also ran under AddressSanitizer without reported memory errors in executed tests.
+The final 1.2.3 run had **60 passes, no skips and no failed assertions**. It ran as
+the ordinary user with access to Apple's Audio Unit registry, without administrator
+rights. The initial restricted run passed 56 scenarios and skipped four because
+it could not resolve Audio Units; that run also verified the unavailable-component
+failure path. The four offline Apple-engine checks then passed, including stereo
+conversion in both directions, mono/anti-alias checks and ten simulated minutes
+of playback with clock drift. These are synthetic tests, not listening checks.
+
+The same 60 scenarios passed under AddressSanitizer with no skips or reported
+memory errors. Clang static analysis of the updated C processor reported zero
+findings. The release app and isolated preview build passed strict ad-hoc
+signature verification.
 
 Tests use in-memory preferences and disposable files under `work/`; they do not
 capture or play hardware audio or change macOS settings. Build and test logs are
 local artifacts and are not committed.
+
+## Security review
+
+The source review covered audio buffer handling and lifecycle, process metadata,
+permissions, stored data, uninstall cleanup, build scripts and repository content.
+This is a source review and local test pass, not an independent penetration test.
+
+Fixed in 1.2.1:
+
+- Reject misaligned, oversized and inconsistent Core Audio object-list lengths
+  before allocation/use; verify scalar property lengths and reject channel-count
+  arithmetic overflow. Unsupported metadata follows the existing failure path.
+- Bound process-name decoding to its fixed field, explicitly terminate executable
+  paths, and reject oversized Wine identities instead of silently truncating them.
+  Clear the temporary kernel argument/environment buffer with `memset_s` before
+  freeing it; only the allowlisted game and bottle fields are retained.
+- Build and package in fresh temporary staging directories, copy an explicit list
+  of resources, and replace the complete generated bundle. Leftover files cannot
+  be inherited from earlier app bundles or installer staging folders.
+
+Validation on 7 October 2026:
+
+- Clang static analysis reported no findings after hardening.
+- A local deterministic mutation harness exercised 100,000 synthetic Wine metadata
+  inputs under AddressSanitizer and UndefinedBehaviorSanitizer without a finding.
+  The installed Command Line Tools lacked libFuzzer; no tool was installed.
+- A stale-file regression placed synthetic markers in old staging folders, the
+  previous generated app and an unexpected icon resource. The new bundle contained
+  only the seven expected files, and the uncompressed installer contained the
+  expected executable/readme and none of the stale markers. Temporary staging
+  directories were removed after packaging.
+- The app passed strict signature verification, and the DMG passed image and
+  SHA-256 verification. Mounting the new image was unavailable in the command
+  environment, so this review did not repeat an installed first-launch check.
+- Repository content was scanned for private keys, access tokens, credential
+  assignments/URLs, sensitive filenames and machine paths. No credentials were
+  found. Retina icon filenames were reviewed as email-pattern false positives.
+
+No network transport/upload code, third-party package dependencies, privileged
+helper or automatic system-setting changes were found in the app. Login-item and
+privacy-settings actions require explicit UI interaction. Uninstall cleanup uses
+the app's own preference domain and explicit file allowlist; its disposable-file
+test verifies that a symlink target and unrelated app data survive cleanup.
+No live audio, permission, login-item or macOS settings changes were made during
+this review. The existing ad-hoc signing/public-distribution limitation remains.
+
+## Follow-up defect review
+
+Reviewed discovery and stable identity, control lifecycle, audio buffers and
+conversion, persistence, UI state, uninstall boundaries and release packaging.
+
+### Behaviour fixes in 1.2.3
+
+The supplied review correctly identified gaps in the earlier 46-scenario suite.
+Five regression scenarios were first run against 1.2.2 and produced eleven failed
+assertions: hidden-app teardown, repeated slider discovery/persistence, unity-gain
+session churn, transient discovery teardown and missing new-app connecting state.
+Those scenarios now pass. Additional regressions cover recovery boundaries.
+
+- Row visibility no longer determines session lifetime. Existing playback processes
+  remain controllable while idle; retaining an idle process with no exposed streams
+  requires its original object, PID and nonzero start time. Input-only and recycled
+  processes are not retained. Playback activity/device listeners supplement polling
+  and are removed on process removal, audio-service restart and shutdown.
+- Gain changes on an existing graph use cached state, with no hardware scan or JSON
+  encoding per slider event. Preferences flush on drag completion, pause, sleep and
+  shutdown; other volume events use a 350 ms debounce. Reset/uninstall cannot be
+  undone by a pending write. Unity gain retains the graph while dragging and for a
+  one-second grace period before the next poll bypasses it.
+- Only known transient discovery status codes receive a grace period, bounded by
+  fewer than three failures and less than two seconds. Existing graphs must still
+  have valid process lifetimes, a live matching output and healthy callbacks.
+  Failed routes stop and latch their errors; unknown/fatal errors stop all control.
+  The last successful inventory stays visible, but no new graph uses stale data.
+- Large buffered backlogs skip forward on the consumer thread with a preallocated
+  five-millisecond crossfade. Normal packet variation and slow drift keep the
+  continuous path. Tests cover 48, 44.1 and 24 kHz, mono/stereo, repeated stalls,
+  ring wraps, partial/interrupted crossfades and muted output. The concurrent
+  lossless-ordering test stays below the deliberate backlog threshold; separate
+  recovery tests verify discarded-frame telemetry and bounded queue depth.
+- A new app appears as Connecting before graph creation. Error rows expose an
+  accessible Retry button, and output icons use stream terminal/device transport
+  metadata instead of guessing from names. Unknown Bluetooth device types use a
+  generic waveform, rather than assuming every Bluetooth device is a headset.
+
+The isolated 1.2.3 interface preview was inspected visually and through its
+accessibility tree. Retry remains available on an error row; adjusting/muting
+Safari to 61% preserved the other app's 37% setting. Unmute restored 61%, and
+pause/resume correctly disabled/re-enabled controls and restored the error action.
+The preview used fake sessions and memory preferences and was then quit. The
+installed mixer, real playback, login items and macOS settings were untouched.
+
+The 1.2.3 installer was built successfully, mounted read-only with `diskutil`,
+and ejected after verification. Both the mounted app and a disposable copied app
+passed strict signature verification. Executable, Info.plist and install text
+matched their build inputs, and both installer filenames passed SHA-256 checks.
+Temporary installer-review/staging directories were removed. A new scan of all
+45 tracked files found no credential patterns or sensitive filenames.
+
+### Previous routing fixes in 1.2.2
+
+A simulated system-output switch reproduced two failures in the previous engine:
+it interrupted an unchanged explicit route, and it retried a failed route whose
+source/destination had not changed. The two new regression scenarios failed with
+five assertions before the fix and passed after it. The engine now relies on each
+app's source/destination signature instead of tearing down every graph when the
+default changes. Sleep and audio-service restarts still release all sessions.
+Existing profile-change, source-change, reconnect, pause and shutdown checks pass.
+
+The rebuilt 1.2.2 app, mounted read-only installer app and project-local copy of
+that app all passed strict signature verification. The mounted executable,
+Info.plist and install instructions matched the build inputs. Both DMG filenames
+have matching bytes and passed SHA-256 verification; the image itself passed its
+checksum check. The bundle contains only its seven expected files. The review
+image was ejected and temporary staging/review directories were removed.
+The installed app was not changed. A fresh scan of all 45 tracked files found no
+credential-pattern or sensitive-filename matches.
+
+### Packaging warning follow-up
+
+The macOS 27 deprecation notice was addressed by replacing `hdiutil convert` with
+`diskutil image create from --format UDZO`, using the syntax in the installed
+`diskutil(8)` manual. Shell syntax and whitespace checks passed. The replacement
+command and complete packaging script then passed with ordinary-user access to
+DiskManagement; there was no conversion deprecation notice. The restricted
+command environment alone could not access that service. No administrator rights
+or changes to macOS settings were needed.
+
+The separate missing-search-directory linker warnings were reproduced with
+Command Line Tools. Disabling XCTest/Swift Testing and supplying an xcconfig did
+not remove the generated search paths; neither workaround was retained. The
+installed Xcode requires licence acceptance before use and was left untouched.
+The project continues to use the selected toolchain and show its diagnostics.
 
 ## Installed-release evidence
 

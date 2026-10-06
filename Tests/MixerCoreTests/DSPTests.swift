@@ -78,6 +78,8 @@ final class DSPTests {
         checkNil(VMCreateDSP(1, 0, 0, 2, 2))
         checkNil(VMCreateDSP(1, 48000, 0, 6, 2))
         checkNil(VMCreateDSP(1, .nan, 0, 2, 2))
+        checkNil(VMCreateDSP(1, 48000, UInt32.max, 2, 2))
+        checkNil(VMCreateDSP(1, 48000, UInt32.max - 1, 2, 2))
     }
     func testUnmuteRampsAndLayoutChangesClearOutput() throws {
         let state = try require(VMCreateDSP(0, 48000, 0, 2, 2)); defer { VMDestroyDSP(state) }

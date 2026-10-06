@@ -2,6 +2,16 @@ import Foundation
 import MixerCore
 
 final class IdentityTests {
+    func testRetainedIdleProcessRequiresOriginalObjectAndLifetime() {
+        let identity = IdentityResolver.resolve(.init(pid: 10, bundleID: "example.player"))
+        let app = AudioApplication(identity: identity, processObjects: [7], pids: [10], active: false,
+            outputDevices: [1], lifetimes: [.init(pid: 10, startTime: 123)])
+        checkTrue(app.owns(object: 7, pid: 10, startTime: 123))
+        checkFalse(app.owns(object: 7, pid: 10, startTime: 124))
+        checkFalse(app.owns(object: 8, pid: 10, startTime: 123))
+        checkFalse(app.owns(object: 7, pid: 11, startTime: 123))
+        checkFalse(app.owns(object: 7, pid: 10, startTime: 0))
+    }
     func testBrowserHelperUsesOuterApplication() {
         checkEqual(IdentityResolver.outerAppPath("/Applications/Google Chrome.app/Contents/Frameworks/Helpers/Helper.app/Contents/MacOS/Helper"), "/Applications/Google Chrome.app")
     }

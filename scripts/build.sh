@@ -16,12 +16,18 @@ if [ "$configuration" = release ]; then build_args+=(-debug-info-format none); f
 xcrun swift build "${build_args[@]}" -c "$configuration" --product VolumeMixer
 binary_dir="$(xcrun swift build "${build_args[@]}" -c "$configuration" --show-bin-path)"
 output_dir="${2:-$project_dir/dist}"
-app_dir="$output_dir/Volume Mixer.app"
+mkdir -p "$output_dir"
+stage_dir="$(mktemp -d "$project_dir/work/build.XXXXXX")"
+trap 'rm -rf -- "$stage_dir"' EXIT
+app_dir="$stage_dir/Volume Mixer.app"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$binary_dir/VolumeMixer" "$app_dir/Contents/MacOS/VolumeMixer"
 cp Resources/Info.plist "$app_dir/Contents/Info.plist"
 if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns "$app_dir/Contents/Resources/AppIcon.icns"; fi
-cp Resources/MenuBarIcon*.png "$app_dir/Contents/Resources/"
+cp Resources/MenuBarIcon.png Resources/MenuBarIcon@2x.png Resources/MenuBarIcon@3x.png "$app_dir/Contents/Resources/"
 codesign --force --sign - --identifier local.oliver.VolumeMixer "$app_dir"
 codesign --verify --strict --verbose=2 "$app_dir"
-echo "$app_dir"
+# Publish a fresh bundle so old resource files cannot leak into a new build.
+rm -rf -- "$output_dir/Volume Mixer.app"
+mv -- "$app_dir" "$output_dir/Volume Mixer.app"
+echo "$output_dir/Volume Mixer.app"

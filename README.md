@@ -2,7 +2,20 @@
 
 A native macOS menu bar mixer with independent app volume, mute, per-app output
 selection, saved settings, and a clean uninstall action. Personal Apple Silicon
-build for macOS 27. Current build: **1.2.0 (5)**.
+build for macOS 27. Current build: **1.2.3 (8)**.
+
+Version 1.2.3 keeps control of idle apps, batches slider persistence, avoids tap
+restarts while dragging around 100%, and preserves healthy routes through brief
+discovery errors. Large buffered-audio backlogs recover with a short crossfade.
+Error rows have a visible Retry button; output icons use hardware metadata.
+
+Version 1.2.2 preserves unaffected app routes when the system output changes,
+including failed routes awaiting retry. Packaging uses macOS 27's
+replacement image-conversion command.
+
+Version 1.2.1 adds bounded audio-property reads, channel-overflow checks, bounded
+process identity parsing, and fresh app/installer staging to exclude leftover
+files. Temporary Wine argument/environment buffers are cleared after parsing.
 
 Version 1.2.0 adds an arrowless native glass menu panel, compact rows, a cobalt
 fader app icon and a matching monochrome menu-bar symbol. It uses the buffered playback engine introduced in 1.1.2. Basic Bluetooth
@@ -29,6 +42,8 @@ or uploaded. The app does not capture microphone input.
   row shows an error. Reconnect the device to resume the saved route, or select
   **System output**. Unsupported formats also restore original playback.
 - Apps playing audio appear automatically; recently active rows remain for 60 seconds.
+- Hiding an idle row does not stop its volume control while its audio process is
+  still valid. Process activity/device notifications supplement the regular poll.
 - Unknown CrossOver/Wine processes have temporary rows. Stable executable/bottle
   identities retain volumes and output choices without relying on recycled PIDs.
 - This build is locally ad-hoc signed, not notarized for public distribution.
@@ -68,6 +83,22 @@ the image or asking for administrator access. The app and installer are publishe
 together under `dist/`. Automated preference tests use memory, not your macOS
 preferences, and cleanup tests use disposable project-local files.
 
+On macOS 27 the compression step uses `diskutil image create from --format UDZO`,
+the replacement for deprecated `hdiutil convert`. Run packaging in a normal macOS
+Terminal session: a restricted automation environment may not expose the disk
+management service this command needs. It only converts the temporary image file.
+
+Command Line Tools builds may still print linker warnings for missing
+`Developer/Library/Frameworks` and `Developer/usr/lib` search directories. Swift's
+build system adds these developer/test paths; this app links against SDK/system
+frameworks and does not need them. These warnings do not prevent a successful
+build. Do not create empty system directories or use administrator rights to
+silence them. A compatible, configured Xcode toolchain can provide those paths;
+Xcode is otherwise optional. See the [SwiftPM search-path configuration](https://github.com/swiftlang/swift-package-manager/blob/main/Sources/XCBuildSupport/PIFBuilder.swift).
+
+The build scripts create fresh staging directories and copy only the expected
+resources. They replace the generated app in `dist/`; they do not install it.
+
 Read-only diagnostics are available from the built executable with `--diagnose`
 (output device and audio app identities) and `--self-check` (packaged preferences).
 `--quit-running` requests a normal quit from the existing instance.
@@ -94,6 +125,23 @@ is at least 2048 input frames and increases for larger render requests; Bluetoot
 and framework latency are additional. This path's total latency is not yet measured.
 No allocations, locks, logging or file access occur in the application's audio
 callbacks.
+
+For a large backlog, the consumer skips toward the target and crossfades 5 ms of
+old/new samples from preallocated storage. The threshold accommodates ordinary
+packet sizes (at least four target buffers and an additional 250 ms where space
+permits); an overflow beyond capacity still restores original playback. Slow clock
+drift continues to use Varispeed without dropping samples.
+
+Slider events on an existing session apply gain directly and publish cached UI
+state. Settings are saved at the end of dragging or after a 350 ms debounce for
+other volume changes, and flushed on pause, sleep and quit. A session at 100% on
+System output stays alive through dragging and a one-second grace period, then
+bypasses on the next poll. Untouched apps still start without a tap.
+
+Known transient discovery errors preserve the last successful inventory and
+healthy, still-identifiable sessions for fewer than three failed reads and less
+than two seconds. Faulty/dead routes stop immediately, and no new graph is created
+from stale discovery data. Fatal or persistent discovery errors restore playback.
 
 Layout faults, stopped output, repeated starvation and overflow stop the graph
 and restore the original playback path. Errors stay latched until a user retry or

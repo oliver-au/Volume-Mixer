@@ -35,6 +35,7 @@ public final class Preferences {
     private let defaults: any PreferencesBacking
     private let domain: String
     private var writable = true
+    private var dirty = false
     private var saved: [String: AppLevel]
     public init(domain: String = Preferences.bundleID, backing: (any PreferencesBacking)? = nil) {
         self.domain = domain
@@ -54,14 +55,18 @@ public final class Preferences {
         set { if writable { defaults.set(newValue, forKey: "paused") } }
     }
     public func level(for identity: AppIdentity) -> AppLevel { identity.persistentKey.flatMap { saved[$0] } ?? AppLevel() }
-    public func save(_ value: AppLevel, for identity: AppIdentity) {
+    public func save(_ value: AppLevel, for identity: AppIdentity, persist: Bool = true) {
         guard writable, let key = identity.persistentKey else { return }
-        saved[key] = value
-        if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: "levels.v1") }
+        saved[key] = value; dirty = true
+        if persist { flush() }
     }
-    public func resetLevels() { guard writable else { return }; saved.removeAll(); defaults.removeObject(forKey: "levels.v1") }
+    public func flush() {
+        guard writable && dirty, let data = try? JSONEncoder().encode(saved) else { return }
+        defaults.set(data, forKey: "levels.v1"); dirty = false
+    }
+    public func resetLevels() { guard writable else { return }; saved.removeAll(); dirty = false; defaults.removeObject(forKey: "levels.v1") }
     @discardableResult public func removeAll() -> Bool {
-        writable = false; saved.removeAll()
+        writable = false; dirty = false; saved.removeAll()
         defaults.removePersistentDomain(forName: domain)
         return defaults.synchronize() && (defaults.persistentDomain(forName: domain)?.isEmpty ?? true)
     }

@@ -45,15 +45,18 @@ enum PanelPreview {
             mBytesPerPacket: 8, mFramesPerPacket: 1, mBytesPerFrame: 8, mChannelsPerFrame: 2,
             mBitsPerChannel: 32, mReserved: 0)
         let headphones = OutputDevice(id: 1, uid: "preview.headphones", name: "WH-1000XM5", sampleRate: 44100,
-                                      inputs: [], outputs: [AudioStreamInfo(id: 10, format: format)])
+                                      inputs: [], outputs: [AudioStreamInfo(id: 10, format: format, terminalType: kAudioStreamTerminalTypeHeadphones)],
+                                      transportType: kAudioDeviceTransportTypeBluetooth)
         let speakers = OutputDevice(id: 2, uid: "preview.speakers", name: "MacBook Pro Speakers", sampleRate: 44100,
-                                    inputs: [], outputs: [AudioStreamInfo(id: 20, format: format)])
+                                    inputs: [], outputs: [AudioStreamInfo(id: 20, format: format, terminalType: kAudioStreamTerminalTypeSpeaker)],
+                                    transportType: kAudioDeviceTransportTypeBuiltIn)
         var environment = MixerEnvironment()
         environment.observesHardware = false
         environment.pollsAutomatically = false
         environment.output = { headphones }
         environment.outputs = { [headphones, speakers] }
-        environment.applications = { apps }
+        environment.applications = { _ in apps }
+        environment.sessionIsUsable = { _, _ in true }
         environment.isRunning = { _ in true }
         environment.makeSession = { app, _, _ in
             if option("error"), app.identity.key == game.key {

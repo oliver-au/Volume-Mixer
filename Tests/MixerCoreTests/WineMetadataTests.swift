@@ -27,4 +27,40 @@ final class WineMetadataTests {
         checkFalse(truncated.withUnsafeBytes { VMExtractWineMetadata($0.baseAddress, $0.count, &info) })
         checkEqual(text(&info.wineExecutable), ""); checkEqual(text(&info.wineBottle), "")
     }
+
+    func testMalformedMetadataNeverReturnsPartialIdentity() {
+        let valid = data(arguments: ["wine64", "C:\\Games\\Game.exe"],
+                         environment: ["WINEPREFIX=/Bottles/Steam", "UNRELATED=private test value"])
+        var info = VMProcessInfo()
+        checkFalse(VMReadProcessInfo(0, nil))
+        checkFalse(VMExtractWineMetadata(nil, 0, &info))
+        checkFalse(valid.withUnsafeBytes { VMExtractWineMetadata($0.baseAddress, $0.count, nil) })
+        // Exercise every truncation boundary, including argument and environment terminators.
+        for length in 0...valid.count {
+            checkTrue(valid.withUnsafeBytes { VMExtractWineMetadata($0.baseAddress, $0.count, &info) })
+            let truncated = Data(valid.prefix(length))
+            let accepted = truncated.withUnsafeBytes { VMExtractWineMetadata($0.baseAddress, $0.count, &info) }
+            if accepted {
+                checkEqual(text(&info.wineExecutable), "C:\\Games\\Game.exe")
+                checkTrue(["", "/Bottles/Steam"].contains(text(&info.wineBottle)))
+            } else {
+                checkEqual(text(&info.wineExecutable), "")
+                checkEqual(text(&info.wineBottle), "")
+            }
+        }
+        for count: Int32 in [-1, 0, 65_537, Int32.max] {
+            var count = count
+            var invalid = valid
+            invalid.replaceSubrange(0..<4, with: withUnsafeBytes(of: &count) { Data($0) })
+            checkFalse(invalid.withUnsafeBytes { VMExtractWineMetadata($0.baseAddress, $0.count, &info) })
+            checkEqual(text(&info.wineExecutable), ""); checkEqual(text(&info.wineBottle), "")
+        }
+        // Long identities must not be truncated into a different app's saved key.
+        for invalid in [data(arguments: ["wine64", String(repeating: "x", count: 4096) + ".exe"], environment: []),
+                        data(arguments: ["wine64", "game.exe"], environment: ["WINEPREFIX=" + String(repeating: "x", count: 4096)]),
+                        data(arguments: ["wine64", "game.exe"], environment: ["CX_BOTTLE=" + String(repeating: "x", count: 4096)])] {
+            checkFalse(invalid.withUnsafeBytes { VMExtractWineMetadata($0.baseAddress, $0.count, &info) })
+            checkEqual(text(&info.wineExecutable), ""); checkEqual(text(&info.wineBottle), "")
+        }
+    }
 }

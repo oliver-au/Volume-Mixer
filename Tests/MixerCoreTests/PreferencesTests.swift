@@ -5,9 +5,13 @@ final class MemoryPreferences: PreferencesBacking {
     var values: [String: Any] = [:]
     var removedDomains: [String] = []
     var canSynchronize = true
+    var levelWrites = 0
     func data(forKey key: String) -> Data? { values[key] as? Data }
     func bool(forKey key: String) -> Bool { values[key] as? Bool ?? false }
-    func set(_ value: Any?, forKey key: String) { values[key] = value }
+    func set(_ value: Any?, forKey key: String) {
+        values[key] = value
+        if key == "levels.v1" { levelWrites += 1 }
+    }
     func removeObject(forKey key: String) { values.removeValue(forKey: key) }
     func removePersistentDomain(forName domain: String) { removedDomains.append(domain); values.removeAll() }
     func persistentDomain(forName domain: String) -> [String: Any]? { values }

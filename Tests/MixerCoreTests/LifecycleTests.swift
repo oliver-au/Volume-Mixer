@@ -25,7 +25,11 @@ private final class EngineHarness {
     var clock = Date(timeIntervalSince1970: 100)
     var failCreation = false
     var failDiscovery = false
+    var temporaryDiscovery = false
+    var scans = 0
+    var unusableOutputs: Set<AudioObjectID> = []
     var rate = 48000.0
+    var defaultOutputID: AudioObjectID = 1
     var extraOutputs: [OutputDevice] = []
     var runningWithoutAudio: Set<String> = []
     var apps: [AudioApplication] = [
@@ -34,18 +38,21 @@ private final class EngineHarness {
         AudioApplication(identity: IdentityResolver.resolve(.init(pid: 20, bundleID: "example.B", appName: "Audio B")),
                          processObjects: [20], pids: [20], active: true, outputDevices: [1])
     ]
-    init() {
+    init(initialLevel: Float? = nil) {
         let preferences = Preferences(backing: store)
         preferences.hasEnabledControl = true
+        if let initialLevel { preferences.save(AppLevel(volume: initialLevel), for: apps[0].identity) }
         var environment = MixerEnvironment()
         environment.observesHardware = false; environment.pollsAutomatically = false
         environment.now = { [unowned self] in clock }
         environment.output = { [unowned self] in
-            if failDiscovery { throw AudioFailure("Simulated device loss") }
-            return OutputDevice(id: 1, uid: "test", name: "Test output", sampleRate: rate, inputs: [], outputs: [])
+            if failDiscovery { throw AudioFailure("Simulated discovery failure", status: temporaryDiscovery ? kAudioHardwareBadPropertySizeError : nil) }
+            return OutputDevice(id: defaultOutputID, uid: defaultOutputID == 1 ? "test" : "test-\(defaultOutputID)",
+                                name: "Test output", sampleRate: rate, inputs: [], outputs: [])
         }
-        environment.applications = { [unowned self] in apps }
+        environment.applications = { [unowned self] _ in scans += 1; return apps }
         environment.outputs = { [unowned self] in extraOutputs }
+        environment.sessionIsUsable = { [unowned self] _, output in !unusableOutputs.contains(output.id) }
         environment.isRunning = { [unowned self] in runningWithoutAudio.contains($0.identity.key) }
         environment.makeSession = { [unowned self] _, output, gain in
             if failCreation { throw AudioFailure("Simulated permission denial") }
@@ -61,7 +68,8 @@ private final class EngineHarness {
     }
     func row(_ id: String) -> MixerRow? { snapshots.last?.rows.first { $0.id == id } }
     func settle(_ change: () -> Void) throws {
-        let before = snapshots.count; change(); try wait { snapshots.count > before }
+        let before = snapshots.count; change()
+        try wait { snapshots.count > before && snapshots.last?.rows.contains(where: \.connecting) == false }
     }
     func stop() throws {
         // shutdown delivers on the main queue, which is pumped by wait().
@@ -70,6 +78,188 @@ private final class EngineHarness {
 }
 
 final class LifecycleTests {
+    func testDraggingDefersSaveAndKeepsUnityUntilFinished() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        h.engine.setEditing(id: "app:example.A", editing: true)
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.5) }
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 1) }
+        h.clock.addTimeInterval(10); h.sessions[0].callbacks += 1
+        try h.settle { h.engine.refreshNow() }
+        checkFalse(h.sessions[0].stopped); checkEqual(h.store.levelWrites, 0)
+        h.engine.setEditing(id: "app:example.A", editing: false)
+        try h.settle { h.engine.refreshNow() }
+        checkEqual(h.store.levelWrites, 1); checkFalse(h.sessions[0].stopped)
+        h.clock.addTimeInterval(2)
+        try h.settle { h.engine.refreshNow() }
+        checkTrue(h.sessions[0].stopped); checkFalse(h.row("app:example.A")!.controlled)
+    }
+    func testPendingSaveIsFlushedOnPauseAndCannotReturnAfterResetOrUninstall() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        h.engine.setEditing(id: "app:example.A", editing: true)
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.3) }
+        checkEqual(h.store.levelWrites, 0)
+        try h.settle { h.engine.setPaused(true) }
+        checkEqual(Preferences(backing: h.store).level(for: h.apps[0].identity).volume, 0.3)
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.2) }
+        try h.settle { h.engine.resetLevels() }
+        try h.stop()
+        checkEqual(Preferences(backing: h.store).level(for: h.apps[0].identity).volume, 1)
+        checkTrue(h.engine.clearSettingsAfterShutdown())
+        h.engine.setLevel(id: "app:example.A", volume: 0.9)
+        try h.stop(); checkTrue(h.store.values.isEmpty)
+    }
+    func testRepeatedDiscoveryFailuresStopControlButRetainRouteChoices() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        h.extraOutputs = [routingOutput(id: 2, uid: "headphones")]
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.5) }
+        h.failDiscovery = true; h.temporaryDiscovery = true
+        for _ in 0..<3 { try h.settle { h.engine.refreshNow() } }
+        checkTrue(h.sessions[0].stopped); checkFalse(h.row("app:example.A")!.controlled)
+        checkTrue(h.row("app:example.A")?.error != nil)
+        checkTrue(h.snapshots.last!.outputs.contains { $0.uid == "headphones" })
+        try h.settle { h.engine.setOutput(id: "app:example.A", uid: "headphones") }
+        checkEqual(h.row("app:example.A")?.level.outputUID, "headphones")
+        checkEqual(h.sessions.count, 1) // Stale inventory cannot create a new graph.
+        h.failDiscovery = false
+        try h.settle { h.engine.refreshNow() }
+        checkEqual(h.sessions.last!.output.uid, "headphones"); checkEqual(h.sessions.count, 2)
+    }
+    func testDiscoveryGraceStillStopsFaultyOrDisconnectedRoutes() throws {
+        for disconnect in [false, true] {
+            let h = EngineHarness(); defer { try? h.stop() }
+            try h.wait { !h.snapshots.isEmpty }
+            h.extraOutputs = [routingOutput(id: 2, uid: "headphones")]
+            try h.settle { h.engine.setLevel(id: "app:example.B", volume: 0.7) }
+            let healthy = try require(h.sessions.last)
+            try h.settle { h.engine.setOutput(id: "app:example.A", uid: "headphones") }
+            let faulty = try require(h.sessions.last)
+            if disconnect { h.unusableOutputs = [2] } else { faulty.fault = 1 }
+            h.failDiscovery = true; h.temporaryDiscovery = true
+            try h.settle { h.engine.refreshNow() }
+            checkTrue(faulty.stopped); checkFalse(healthy.stopped)
+            checkFalse(h.row("app:example.A")!.controlled); checkTrue(h.row("app:example.B")!.controlled)
+            h.failDiscovery = false; h.unusableOutputs.removeAll()
+            try h.settle { h.engine.refreshNow() }
+            checkFalse(h.row("app:example.A")!.controlled); checkFalse(healthy.stopped)
+            try h.settle { h.engine.retry(id: "app:example.A") }
+            checkTrue(h.row("app:example.A")!.controlled)
+        }
+    }
+    func testDiscoveryGraceHasTimeLimit() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.5) }
+        h.failDiscovery = true; h.temporaryDiscovery = true
+        try h.settle { h.engine.refreshNow() }
+        h.clock.addTimeInterval(2.1); h.sessions[0].callbacks += 1
+        try h.settle { h.engine.refreshNow() }
+        checkTrue(h.sessions[0].stopped)
+    }
+    func testHiddenIdleAppKeepsAttenuation() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.5) }
+        let session = try require(h.sessions.first)
+        h.apps[0].active = false
+        try h.settle { h.engine.refreshNow() }
+        h.clock.addTimeInterval(61)
+        try h.settle { h.engine.refreshNow() }
+        checkNil(h.row("app:example.A")); checkFalse(session.stopped)
+        h.apps[0].active = true; session.callbacks += 1
+        try h.settle { h.engine.refreshNow() }
+        checkEqual(h.sessions.count, 1); checkEqual(session.gain, 0.5)
+        checkTrue(h.row("app:example.A")!.controlled)
+    }
+    func testSliderUpdatesDoNotScanOrWriteForEveryEvent() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.5) }
+        let scans = h.scans, writes = h.store.levelWrites
+        for n in 1...40 { h.engine.setLevel(id: "app:example.A", volume: Float(n) / 100) }
+        try h.wait { h.row("app:example.A")?.level.volume == 0.4 }
+        checkEqual(h.scans, scans)
+        checkLessEqual(h.store.levelWrites - writes, 1)
+        checkEqual(h.sessions.count, 1); checkEqual(h.sessions[0].gain, 0.4)
+        try h.stop()
+        checkEqual(Preferences(backing: h.store).level(for: h.apps[0].identity).volume, 0.4)
+    }
+    func testUnityBoundaryDoesNotChurnSessions() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.99) }
+        for _ in 0..<5 {
+            try h.settle { h.engine.setLevel(id: "app:example.A", volume: 1) }
+            try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.99) }
+        }
+        checkEqual(h.sessions.count, 1); checkFalse(h.sessions[0].stopped)
+    }
+    func testTemporaryDiscoveryFailurePreservesHealthyControl() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.5) }
+        h.failDiscovery = true; h.temporaryDiscovery = true
+        try h.settle { h.engine.refreshNow() }
+        checkFalse(h.sessions[0].stopped)
+        checkEqual(h.snapshots.last?.rows.count, 2)
+        checkTrue(h.row("app:example.A")?.controlled == true)
+        h.failDiscovery = false
+        try h.settle { h.engine.refreshNow() }
+        checkEqual(h.sessions.count, 1); checkNil(h.snapshots.last?.error)
+    }
+    func testNewAppPublishesConnecting() throws {
+        let h = EngineHarness(initialLevel: 0.5); defer { try? h.stop() }
+        try h.wait { h.row("app:example.A")?.controlled == true }
+        checkTrue(h.snapshots.contains { $0.rows.contains { $0.id == "app:example.A" && $0.connecting } })
+    }
+    func testDefaultOutputSwitchPreservesUnchangedExplicitRoute() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        h.extraOutputs = [routingOutput(id: 2, uid: "headphones")]
+        try h.settle { h.engine.refreshNow() }
+        h.engine.setOutput(id: "app:example.A", uid: "headphones")
+        try h.wait { h.row("app:example.A")?.controlled == true }
+        let headphones = try require(h.sessions.last)
+        h.engine.setLevel(id: "app:example.B", volume: 0.5)
+        try h.wait { h.row("app:example.B")?.controlled == true }
+        let originalDefault = try require(h.sessions.last)
+        // Both apps still produce audio on device 1; it remains connected.
+        // Only the system-following playback destination changes to device 3.
+        h.extraOutputs.append(originalDefault.output)
+        h.defaultOutputID = 3
+        try h.settle { h.engine.refreshNow() }
+        try h.wait { h.snapshots.last?.outputs.contains { $0.id == 3 } == true }
+        checkFalse(headphones.stopped)
+        checkTrue(originalDefault.stopped)
+        checkEqual(h.sessions.count, 3)
+        checkEqual(h.sessions.first { $0.output.id == 3 }?.gain, 0.5)
+        checkTrue(h.row("app:example.A")!.controlled)
+        checkTrue(h.row("app:example.B")!.controlled)
+    }
+    func testUnrelatedDefaultSwitchDoesNotRetryFailedExplicitRoute() throws {
+        let h = EngineHarness(); defer { try? h.stop() }
+        try h.wait { !h.snapshots.isEmpty }
+        h.extraOutputs = [routingOutput(id: 2, uid: "headphones")]
+        // Keep the original source in the inventory after changing the default.
+        h.extraOutputs.append(try require(h.snapshots.last?.outputs.first { $0.id == 1 }))
+        try h.settle { h.engine.refreshNow() }
+        h.failCreation = true
+        h.engine.setOutput(id: "app:example.A", uid: "headphones")
+        try h.wait { h.row("app:example.A")?.error != nil }
+        let error = h.row("app:example.A")?.error
+        h.failCreation = false; h.defaultOutputID = 3
+        try h.settle { h.engine.refreshNow() }
+        try h.wait { h.snapshots.last?.outputs.contains { $0.id == 3 } == true }
+        checkEqual(h.row("app:example.A")?.error, error)
+        checkFalse(h.row("app:example.A")!.controlled)
+        checkTrue(h.sessions.isEmpty)
+        h.engine.retry(id: "app:example.A")
+        try h.wait { h.row("app:example.A")?.controlled == true }
+        checkNil(h.row("app:example.A")!.error)
+        checkEqual(h.sessions.count, 1)
+    }
     func testExplicitOutputAtUnityIsIndependentAndPauseRestoresOriginal() throws {
         let h = EngineHarness(); defer { try? h.stop() }
         try h.wait { !h.snapshots.isEmpty }
@@ -153,6 +343,9 @@ final class LifecycleTests {
         checkFalse(h.row("app:example.B")!.controlled)
         let original = h.sessions.last!
         try h.settle { h.engine.setLevel(id: "app:example.A", volume: 1) }
+        checkFalse(original.stopped)
+        h.clock.addTimeInterval(2)
+        try h.settle { h.engine.refreshNow() }
         checkFalse(h.row("app:example.A")!.controlled)
         checkTrue(original.stopped)
     }
@@ -201,7 +394,7 @@ final class LifecycleTests {
         checkTrue(h.sessions[1].stopped)
         h.failDiscovery = true; h.engine.refreshNow()
         try h.wait { h.snapshots.last?.error != nil }
-        checkTrue(h.sessions.allSatisfy(\.stopped)); checkTrue(h.snapshots.last!.rows.isEmpty)
+        checkTrue(h.sessions.allSatisfy(\.stopped)); checkFalse(h.row("app:example.A")!.controlled)
         h.failDiscovery = false; h.engine.refreshNow()
         try h.wait { h.row("app:example.A")?.controlled == true }
         checkEqual(h.sessions.count, 4)

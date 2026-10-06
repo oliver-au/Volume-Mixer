@@ -1,3 +1,4 @@
+#define __STDC_WANT_LIB_EXT1__ 1
 #include "AudioDSP.h"
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -27,7 +28,8 @@ static float bounded(float value) {
 
 VMDSPState *VMCreateDSP(float gain, double rate, uint32_t offset, uint32_t inCh, uint32_t outCh) {
     if (!isfinite(rate) || rate < 8000 || rate > 384000 ||
-        inCh < 1 || inCh > 2 || outCh < 1 || outCh > 2) return NULL;
+        inCh < 1 || inCh > 2 || outCh < 1 || outCh > 2 ||
+        (uint64_t)offset + inCh > UINT32_MAX) return NULL;
     VMDSPState *s = calloc(1, sizeof(*s));
     if (!s) return NULL;
     atomic_init(&s->target, bounded(gain)); atomic_init(&s->peak, 0); atomic_init(&s->outputPeak, 0);
@@ -74,7 +76,8 @@ OSStatus VMRender(VMDSPState *s, const AudioBufferList *input, AudioBufferList *
     atomic_fetch_add_explicit(&s->callbacks, 1, memory_order_relaxed);
     // A timing/layout fault remains silent until the control queue tears down the graph.
     if (atomic_load_explicit(&s->fault, memory_order_relaxed)) return noErr;
-    if (channels(output) != s->outputChannels ||
+    if (s->inputChannels < 1 || s->inputChannels > 2 || s->outputChannels < 1 || s->outputChannels > 2 ||
+        channels(output) != s->outputChannels ||
         (input && input->mNumberBuffers && channels(input) < (uint64_t)s->offset + s->inputChannels)) {
         atomic_store_explicit(&s->fault, 1, memory_order_relaxed);
         return noErr;
@@ -148,10 +151,11 @@ OSStatus VMSetInputUsage(AudioObjectID device, AudioDeviceIOProcID proc, uint32_
 
 enum { BridgeCapacity = 65536, BridgeMaxSlice = 16384 };
 struct VMBridge {
-    float *ring, *scratch;
+    float *ring, *scratch, *fadeTail;
     VMDSPState *dsp;
     uint32_t inputChannels, outputChannels;
-    _Atomic uint64_t written, read, deliveredFrames, underruns;
+    uint32_t fadeLength, fadePosition, extraLatencyFrames;
+    _Atomic uint64_t written, read, deliveredFrames, underruns, droppedFrames;
     _Atomic uint32_t fault, targetFrames;
     bool primed; // Only the playback callback touches this field.
 };
@@ -163,15 +167,19 @@ VMBridge *VMCreateBridge(float gain, double rate, uint32_t inputChannels, uint32
     s->dsp = dsp; s->inputChannels = inputChannels; s->outputChannels = outputChannels;
     s->ring = calloc(BridgeCapacity * inputChannels, sizeof(float));
     s->scratch = calloc(BridgeMaxSlice * inputChannels, sizeof(float));
-    if (!s->ring || !s->scratch) { VMDestroyBridge(s); return NULL; }
+    s->fadeLength = (uint32_t)ceil(rate * .005); s->fadePosition = s->fadeLength;
+    s->extraLatencyFrames = (uint32_t)ceil(rate * .25);
+    s->fadeTail = calloc(s->fadeLength * inputChannels, sizeof(float));
+    if (!s->ring || !s->scratch || !s->fadeTail) { VMDestroyBridge(s); return NULL; }
     atomic_init(&s->written, 0); atomic_init(&s->read, 0);
     atomic_init(&s->deliveredFrames, 0);
     atomic_init(&s->underruns, 0); atomic_init(&s->fault, 0); atomic_init(&s->targetFrames, 2048);
+    atomic_init(&s->droppedFrames, 0);
     return s;
 }
 void VMDestroyBridge(VMBridge *s) {
     if (!s) return;
-    VMDestroyDSP(s->dsp); free(s->ring); free(s->scratch); free(s);
+    VMDestroyDSP(s->dsp); free(s->ring); free(s->scratch); free(s->fadeTail); free(s);
 }
 void VMBridgeSetGain(VMBridge *s, float gain) { VMSetGain(s->dsp, gain); }
 uint32_t VMBridgeFault(VMBridge *s) {
@@ -186,6 +194,7 @@ uint32_t VMBridgeQueuedFrames(VMBridge *s) {
 uint32_t VMBridgeTargetFrames(VMBridge *s) { return atomic_load_explicit(&s->targetFrames, memory_order_relaxed); }
 uint64_t VMBridgeDeliveredFrames(VMBridge *s) { return atomic_load_explicit(&s->deliveredFrames, memory_order_relaxed); }
 uint64_t VMBridgeUnderruns(VMBridge *s) { return atomic_load_explicit(&s->underruns, memory_order_relaxed); }
+uint64_t VMBridgeDroppedFrames(VMBridge *s) { return atomic_load_explicit(&s->droppedFrames, memory_order_relaxed); }
 float VMBridgePeak(VMBridge *s) { return VMGetPeak(s->dsp); }
 float VMBridgeOutputPeak(VMBridge *s) { return VMGetOutputPeak(s->dsp); }
 
@@ -228,6 +237,32 @@ OSStatus VMBridgeRender(VMBridge *s, uint32_t frames, AudioBufferList *output) {
     uint64_t read = atomic_load_explicit(&s->read, memory_order_relaxed);
     uint64_t written = atomic_load_explicit(&s->written, memory_order_acquire);
     uint64_t available = written - read;
+    // Ordinary packet-size variation and slow drift keep the continuous path.
+    // A large backlog (for example a 500 ms output stall) returns to the target
+    // promptly, crossfading five milliseconds of old/new audio on the consumer.
+    uint32_t limit = target * 4;
+    if (limit < target + s->extraLatencyFrames) limit = target + s->extraLatencyFrames;
+    if (limit > BridgeCapacity - BridgeMaxSlice) limit = BridgeCapacity - BridgeMaxSlice;
+    if (available > limit) {
+        for (uint32_t i = 0; i < s->fadeLength; ++i) {
+            uint32_t slot = (uint32_t)((read + i) & (BridgeCapacity - 1)) * s->inputChannels;
+            for (uint32_t c = 0; c < s->inputChannels; ++c) {
+                float sample = s->ring[slot + c];
+                // Preserve continuity even if another stall interrupts a fade.
+                uint32_t previous = s->fadePosition + i;
+                if (previous < s->fadeLength) {
+                    float mix = (float)(previous + 1) / s->fadeLength;
+                    sample = s->fadeTail[previous * s->inputChannels + c] * (1.f - mix) + sample * mix;
+                }
+                s->fadeTail[i * s->inputChannels + c] = sample;
+            }
+        }
+        uint64_t next = written - target;
+        atomic_fetch_add_explicit(&s->droppedFrames, next - read, memory_order_relaxed);
+        read = next; available = target; s->fadePosition = 0;
+        // Publish the new read position only AFTER copying all old/new samples.
+        // Until then the producer cannot overwrite data needed for this render.
+    }
     if (!s->primed) {
         if (available < target) return noErr;
         s->primed = true;
@@ -241,7 +276,15 @@ OSStatus VMBridgeRender(VMBridge *s, uint32_t frames, AudioBufferList *output) {
     }
     for (uint32_t i = 0; i < frames; ++i) {
         uint32_t slot = (uint32_t)((read + i) & (BridgeCapacity - 1)) * s->inputChannels;
-        for (uint32_t c = 0; c < s->inputChannels; ++c) s->scratch[i * s->inputChannels + c] = s->ring[slot + c];
+        for (uint32_t c = 0; c < s->inputChannels; ++c) {
+            float sample = s->ring[slot + c];
+            if (s->fadePosition < s->fadeLength) {
+                float mix = (float)(s->fadePosition + 1) / s->fadeLength;
+                sample = s->fadeTail[s->fadePosition * s->inputChannels + c] * (1.f - mix) + sample * mix;
+            }
+            s->scratch[i * s->inputChannels + c] = sample;
+        }
+        if (s->fadePosition < s->fadeLength) s->fadePosition++;
     }
     atomic_store_explicit(&s->read, read + frames, memory_order_release);
     atomic_fetch_add_explicit(&s->deliveredFrames, frames, memory_order_relaxed);
@@ -288,6 +331,7 @@ bool VMExtractWineMetadata(const void *bytes, size_t size, VMProcessInfo *info) 
         if (p >= end) goto invalid;
         len = strnlen(p, end-p); if (p+len >= end) goto invalid;
         if (len > 4 && !strcasecmp(p+len-4, ".exe") && !strcasestr(p, "winewrapper.exe")) {
+            if (len >= sizeof(info->wineExecutable)) goto invalid;
             if (info->wineExecutable[0] && strcasecmp(info->wineExecutable, p)) ambiguous = true;
             else strlcpy(info->wineExecutable, p, sizeof(info->wineExecutable));
         }
@@ -295,8 +339,13 @@ bool VMExtractWineMetadata(const void *bytes, size_t size, VMProcessInfo *info) 
     }
     while (p < end) {
         len = strnlen(p, end-p); if (p+len >= end) goto invalid;
-        if (len >= 11 && !strncmp(p, "WINEPREFIX=", 11)) strlcpy(info->wineBottle, p+11, sizeof(info->wineBottle));
-        else if (len >= 10 && !info->wineBottle[0] && !strncmp(p, "CX_BOTTLE=", 10)) strlcpy(info->wineBottle, p+10, sizeof(info->wineBottle));
+        if (len >= 11 && !strncmp(p, "WINEPREFIX=", 11)) {
+            if (len - 11 >= sizeof(info->wineBottle)) goto invalid;
+            strlcpy(info->wineBottle, p+11, sizeof(info->wineBottle));
+        } else if (len >= 10 && !info->wineBottle[0] && !strncmp(p, "CX_BOTTLE=", 10)) {
+            if (len - 10 >= sizeof(info->wineBottle)) goto invalid;
+            strlcpy(info->wineBottle, p+10, sizeof(info->wineBottle));
+        }
         p += len+1;
     }
     if (ambiguous) info->wineExecutable[0] = 0;
@@ -307,21 +356,29 @@ invalid:
 }
 
 bool VMReadProcessInfo(pid_t pid, VMProcessInfo *info) {
+    if (!info) return false;
     memset(info, 0, sizeof(*info));
-    struct proc_bsdinfo bsd;
+    struct proc_bsdinfo bsd = {0};
     int result = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd, sizeof(bsd));
     if (result != sizeof(bsd)) return false;
     info->parent = bsd.pbi_ppid;
     info->startTime = bsd.pbi_start_tvsec * 1000000ULL + bsd.pbi_start_tvusec;
     proc_pidpath(pid, info->executable, sizeof(info->executable));
-    strlcpy(info->name, bsd.pbi_name, sizeof(info->name));
+    info->executable[sizeof(info->executable) - 1] = 0;
+    size_t nameLength = strnlen(bsd.pbi_name, sizeof(bsd.pbi_name));
+    if (nameLength >= sizeof(info->name)) nameLength = sizeof(info->name) - 1;
+    memcpy(info->name, bsd.pbi_name, nameLength);
     if (!strcasestr(info->executable, "wine") && !strcasestr(info->executable, "crossover") &&
         !strcasestr(info->executable, ".exe")) return true;
     int mib[] = {CTL_KERN, KERN_PROCARGS2, pid};
-    size_t size = 256 * 1024;
-    char *args = calloc(1, size);
+    const size_t capacity = 256 * 1024;
+    size_t size = capacity;
+    char *args = calloc(1, capacity);
     if (!args) return true;
-    if (sysctl(mib, 3, args, &size, NULL, 0) == 0) VMExtractWineMetadata(args, size, info);
+    if (sysctl(mib, 3, args, &size, NULL, 0) == 0 && size <= capacity) VMExtractWineMetadata(args, size, info);
+    // The OS returns the whole argument/environment block. Discard unrelated
+    // values immediately; only the two allowlisted Wine identity fields survive.
+    (void)memset_s(args, capacity, 0, capacity);
     free(args);
     return true;
 }

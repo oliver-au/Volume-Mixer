@@ -28,6 +28,7 @@ struct MixerPanel: View {
                                 outputs: snapshot.outputs, systemOutputName: snapshot.outputName,
                                 route: { model.engine.setOutput(id: row.id, uid: $0) },
                                 change: { model.engine.setLevel(id: row.id, volume: $0) },
+                                editing: { model.engine.setEditing(id: row.id, editing: $0) },
                                 mute: { model.engine.setLevel(id: row.id, toggleMute: true) },
                                 retry: { model.engine.retry(id: row.id) },
                                 permissions: { model.openPermissions() })
@@ -92,8 +93,7 @@ struct MixerPanel: View {
     }
 
     private var outputSymbol: String {
-        let name = (model.snapshot?.outputName ?? "").lowercased()
-        return name.contains("headphone") || name.contains("airpods") || name.hasPrefix("wh-") ? "headphones" : "speaker.wave.2"
+        model.snapshot?.outputSymbol ?? "speaker.wave.2"
     }
 
     private func footer(_ snapshot: MixerSnapshot) -> some View {
@@ -158,6 +158,7 @@ private struct AppVolumeRow: View {
     let systemOutputName: String
     let route: (String?) -> Void
     let change: (Float) -> Void
+    let editing: (Bool) -> Void
     let mute: () -> Void
     let retry: () -> Void
     let permissions: () -> Void
@@ -180,9 +181,10 @@ private struct AppVolumeRow: View {
             HStack(spacing: 8) {
                 VolumeSlider(value: Binding(get: { value }, set: { interaction.draggingValue = $0; change(Float($0)) }),
                        enabled: canControl, muted: row.level.muted, appName: row.identity.name,
-                       editingChanged: { editing in
-                           interaction.editing = editing
-                           if !editing { interaction.draggingValue = nil }
+                       editingChanged: { isEditing in
+                           interaction.editing = isEditing
+                           editing(isEditing)
+                           if !isEditing { interaction.draggingValue = nil }
                        })
                     .onChange(of: row.level) { _, _ in
                         if !interaction.editing { interaction.draggingValue = nil }
@@ -225,10 +227,17 @@ private struct AppVolumeRow: View {
         if row.connecting {
             Text("Connecting audio…").font(.system(size: 11)).foregroundStyle(.secondary)
         } else if let error = row.error {
-            Button { interaction.showError = true } label: {
-                Label("Control unavailable", systemImage: "exclamationmark.circle")
+            HStack {
+                Button { interaction.showError = true } label: {
+                    Label("Control unavailable", systemImage: "exclamationmark.circle")
+                }
+                .buttonStyle(.plain).foregroundStyle(.orange).help(error)
+                Spacer()
+                Button("Retry", action: retry).buttonStyle(.bordered).controlSize(.mini)
+                    .disabled(!enabled || !row.running)
+                    .accessibilityLabel("Retry control for \(row.identity.name)")
             }
-            .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.orange).help(error)
+            .font(.system(size: 11))
             .popover(isPresented: $interaction.showError) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Control unavailable").font(.headline)

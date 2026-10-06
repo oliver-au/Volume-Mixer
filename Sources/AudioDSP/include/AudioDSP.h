@@ -34,6 +34,7 @@ uint32_t VMBridgeFault(VMBridge *bridge);
 uint32_t VMBridgeQueuedFrames(VMBridge *bridge);
 uint32_t VMBridgeTargetFrames(VMBridge *bridge);
 uint64_t VMBridgeUnderruns(VMBridge *bridge);
+uint64_t VMBridgeDroppedFrames(VMBridge *bridge);
 float VMBridgePeak(VMBridge *bridge);
 float VMBridgeOutputPeak(VMBridge *bridge);
 
