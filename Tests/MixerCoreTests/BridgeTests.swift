@@ -3,6 +3,100 @@ import CoreAudio
 import AudioDSP
 
 final class BridgeTests {
+    func testFullQueueReprimesWithFreshAudioAndPreservesGain() throws {
+        for (rate, inputChannels, outputChannels): (Double, UInt32, UInt32) in
+            [(48000, 2, 2), (44100, 1, 2), (24000, 2, 1)] {
+            let bridge = try require(VMCreateBridge(0.5, rate, inputChannels, outputChannels))
+            defer { VMDestroyBridge(bridge) }
+            let old = Buffers(channels: [Int(inputChannels)], frames: 512, fill: 0.8)
+            let fresh = Buffers(channels: [Int(inputChannels)], frames: 512, fill: -0.8)
+            let output = Buffers(channels: Array(repeating: 1, count: Int(outputChannels)), frames: 512)
+            for cycle in 0..<6 {
+                let gain: Float = cycle == 2 ? 0 : (cycle > 2 ? 0.37 : 0.5)
+                VMBridgeSetGain(bridge, gain)
+                for _ in 0..<4 { VMBridgeCapture(bridge, old.list.unsafePointer) }
+                VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+                let delivered = VMBridgeDeliveredFrames(bridge), dropped = VMBridgeDroppedFrames(bridge)
+                // A stalled output while capture supplies ordinary-sized packets.
+                for _ in 0..<160 { VMBridgeCapture(bridge, old.list.unsafePointer) }
+                checkEqual(VMBridgeFault(bridge), 0)
+                let queued = VMBridgeQueuedFrames(bridge)
+                VMBridgeCapture(bridge, fresh.list.unsafePointer)
+                checkEqual(VMBridgeQueuedFrames(bridge), queued) // Capture waits for the consumer's reset.
+                VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+                checkTrue(output.samples().allSatisfy { $0 == 0 })
+                checkEqual(VMBridgeQueuedFrames(bridge), 0)
+                checkEqual(VMBridgeDeliveredFrames(bridge), delivered)
+                checkGreater(VMBridgeDroppedFrames(bridge), dropped)
+                for _ in 0..<3 { VMBridgeCapture(bridge, fresh.list.unsafePointer) }
+                VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+                checkTrue(output.samples().allSatisfy { $0 == 0 }) // Re-prime before exposing new samples.
+                VMBridgeCapture(bridge, fresh.list.unsafePointer)
+                VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+                var previous: Float = 0
+                for sample in output.samples() {
+                    checkTrue(sample.isFinite && sample <= 0) // Never replay the positive stale tail.
+                    checkLess(abs(sample - previous), 0.005)
+                    previous = sample
+                }
+                checkEqual(previous, -0.8 * gain, accuracy: 0.00001)
+                if outputChannels == 2 { checkEqual(Array(output.samples(0)), Array(output.samples(1))) }
+                checkEqual(VMBridgeFault(bridge), 0); checkEqual(VMBridgeUnderruns(bridge), 0)
+            }
+        }
+    }
+    func testConcurrentOverflowRecoveryKeepsChannelsConsistent() throws {
+        let bridge = try require(VMCreateBridge(0.5, 48000, 2, 2)); defer { VMDestroyBridge(bridge) }
+        let group = DispatchGroup(), result = ConcurrentResult()
+        let filled = DispatchSemaphore(value: 0), produced = DispatchSemaphore(value: 0), cleared = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async(group: group) {
+            let input = Buffers(channels: [2], frames: 512)
+            var sequence = 0
+            func capture() {
+                for i in 0..<512 {
+                    let sample = Float((sequence + i) % 997) / 1000
+                    input.samples()[2*i] = sample; input.samples()[2*i + 1] = -sample
+                }
+                sequence += 512; VMBridgeCapture(bridge, input.list.unsafePointer)
+            }
+            for _ in 0..<16 {
+                for _ in 0..<160 { capture() }
+                filled.signal()
+                for _ in 0..<64 { capture() } // Race only through the bridge's atomic protocol.
+                produced.signal()
+                if cleared.wait(timeout: .now() + 10) != .success { result.fail("Recovery capture timed out"); return }
+            }
+        }
+        DispatchQueue.global().async(group: group) {
+            let output = Buffers(channels: [1, 1], frames: 512)
+            for _ in 0..<16 {
+                if filled.wait(timeout: .now() + 10) != .success { result.fail("Recovery render timed out"); return }
+                for _ in 0..<128 {
+                    VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+                    for i in 0..<512 {
+                        let left = output.samples(0)[i], right = output.samples(1)[i]
+                        if !left.isFinite || !right.isFinite || abs(left + right) > 0.000001 || abs(left) > 0.5 {
+                            result.fail("Recovery exposed a torn or invalid stereo frame"); break
+                        }
+                    }
+                }
+                if produced.wait(timeout: .now() + 10) != .success { result.fail("Recovery producer timed out"); return }
+                VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+                cleared.signal()
+            }
+        }
+        group.wait()
+        checkNil(result.error); checkEqual(VMBridgeFault(bridge), 0)
+        checkGreater(VMBridgeDroppedFrames(bridge), 0)
+        // After concurrent traffic stops, a complete overflow/reset must still recover.
+        let input = Buffers(channels: [2], frames: 512, fill: 0.8)
+        let output = Buffers(channels: [2], frames: 512)
+        for _ in 0..<160 { VMBridgeCapture(bridge, input.list.unsafePointer) }
+        VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+        for _ in 0..<4 { VMBridgeCapture(bridge, input.list.unsafePointer) }
+        VMBridgeRender(bridge, 512, output.list.unsafeMutablePointer)
+        checkEqual(output.samples().last!, 0.4, accuracy: 0.00001)
+    }
     func testStallBacklogRecoversWithSmoothCrossfadeAcrossWraps() throws {
         for (rate, inputChannels, outputChannels): (Double, UInt32, UInt32) in
             [(48000, 2, 2), (44100, 1, 2), (24000, 2, 1)] {

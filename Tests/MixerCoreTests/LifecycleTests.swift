@@ -78,6 +78,22 @@ private final class EngineHarness {
 }
 
 final class LifecycleTests {
+    func testKeyboardStyleChangesDebouncePersistence() throws {
+        let h = EngineHarness(initialLevel: 0.8); defer { try? h.stop() }
+        try h.wait { h.row("app:example.A")?.controlled == true }
+        let writes = h.store.levelWrites, scans = h.scans
+        let session = try require(h.sessions.first)
+        // Discrete key actions use the debounce, without mouse-drag brackets.
+        for i in 0..<20 {
+            try h.settle { h.engine.setLevel(id: "app:example.A", volume: 0.79 - Float(i) * 0.01) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            checkEqual(h.store.levelWrites, writes)
+        }
+        try h.wait { h.store.levelWrites == writes + 1 }
+        checkEqual(h.scans, scans); checkEqual(h.sessions.count, 1)
+        checkFalse(session.stopped)
+        checkEqual(Preferences(backing: h.store).level(for: h.apps[0].identity).volume, 0.6, accuracy: 0.00001)
+    }
     func testDraggingDefersSaveAndKeepsUnityUntilFinished() throws {
         let h = EngineHarness(); defer { try? h.stop() }
         try h.wait { !h.snapshots.isEmpty }

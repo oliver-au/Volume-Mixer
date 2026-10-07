@@ -105,7 +105,7 @@ OSStatus VMRender(VMDSPState *s, const AudioBufferList *input, AudioBufferList *
     // buffers; a changed stream must be rebuilt through buffered playback.
     if (inputFrames != outputFrames) { atomic_store(&s->fault, 2); return noErr; }
     float target = atomic_load_explicit(&s->target, memory_order_relaxed), peak = 0, outputPeak = 0;
-    uint32_t count = inputFrames < outputFrames ? inputFrames : outputFrames;
+    uint32_t count = inputFrames;
     for (uint32_t i = 0; i < count; i++) {
         float delta = target - s->current;
         s->current += fmaxf(-s->step, fminf(s->step, delta));
@@ -157,6 +157,9 @@ struct VMBridge {
     uint32_t fadeLength, fadePosition, extraLatencyFrames;
     _Atomic uint64_t written, read, deliveredFrames, underruns, droppedFrames;
     _Atomic uint32_t fault, targetFrames;
+    // Capture owns written; playback owns read. Capture waits for playback to
+    // acknowledge a discontinuity instead of overwriting possibly in-flight data.
+    _Atomic bool resetRequested;
     bool primed; // Only the playback callback touches this field.
 };
 VMBridge *VMCreateBridge(float gain, double rate, uint32_t inputChannels, uint32_t outputChannels) {
@@ -174,7 +177,7 @@ VMBridge *VMCreateBridge(float gain, double rate, uint32_t inputChannels, uint32
     atomic_init(&s->written, 0); atomic_init(&s->read, 0);
     atomic_init(&s->deliveredFrames, 0);
     atomic_init(&s->underruns, 0); atomic_init(&s->fault, 0); atomic_init(&s->targetFrames, 2048);
-    atomic_init(&s->droppedFrames, 0);
+    atomic_init(&s->droppedFrames, 0); atomic_init(&s->resetRequested, false);
     return s;
 }
 void VMDestroyBridge(VMBridge *s) {
@@ -206,9 +209,20 @@ void VMBridgeCapture(VMBridge *s, const AudioBufferList *input) {
         if (!channel(input, c, &data[c], &stride[c], &f)) return;
         if (f < frames) frames = f;
     }
+    if (frames > BridgeCapacity) { atomic_store(&s->fault, 3); return; }
+    if (atomic_load_explicit(&s->resetRequested, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&s->droppedFrames, frames, memory_order_relaxed);
+        return;
+    }
+    // Read the cursor after the acknowledgement, so a completed reset cannot
+    // be mistaken for another overflow using a pre-reset cursor snapshot.
     uint64_t written = atomic_load_explicit(&s->written, memory_order_relaxed);
     uint64_t read = atomic_load_explicit(&s->read, memory_order_acquire);
-    if (frames > BridgeCapacity || written + frames - read > BridgeCapacity) { atomic_store(&s->fault, 3); return; }
+    if (written + frames - read > BridgeCapacity) {
+        atomic_fetch_add_explicit(&s->droppedFrames, frames, memory_order_relaxed);
+        atomic_store_explicit(&s->resetRequested, true, memory_order_release);
+        return;
+    }
     for (uint32_t i = 0; i < frames; ++i) {
         uint32_t slot = (uint32_t)((written + i) & (BridgeCapacity - 1)) * s->inputChannels;
         for (uint32_t c = 0; c < s->inputChannels; ++c) {
@@ -234,6 +248,19 @@ OSStatus VMBridgeRender(VMBridge *s, uint32_t frames, AudioBufferList *output) {
     uint32_t target = frames * 2 > 2048 ? frames * 2 : 2048;
     if (target > BridgeCapacity / 2) target = BridgeCapacity / 2;
     atomic_store_explicit(&s->targetFrames, target, memory_order_relaxed);
+    if (atomic_load_explicit(&s->resetRequested, memory_order_acquire)) {
+        // The producer drops incoming packets until this acknowledgement. Only
+        // the consumer discards queued data; no callback can overwrite samples
+        // another callback is reading. Resume from fresh audio with a short fade.
+        uint64_t read = atomic_load_explicit(&s->read, memory_order_relaxed);
+        uint64_t written = atomic_load_explicit(&s->written, memory_order_acquire);
+        atomic_fetch_add_explicit(&s->droppedFrames, written - read, memory_order_relaxed);
+        s->primed = false; s->fadePosition = 0;
+        memset(s->fadeTail, 0, s->fadeLength * s->inputChannels * sizeof(float));
+        atomic_store_explicit(&s->read, written, memory_order_release);
+        atomic_store_explicit(&s->resetRequested, false, memory_order_release);
+        return noErr;
+    }
     uint64_t read = atomic_load_explicit(&s->read, memory_order_relaxed);
     uint64_t written = atomic_load_explicit(&s->written, memory_order_acquire);
     uint64_t available = written - read;

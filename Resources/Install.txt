@@ -1,4 +1,4 @@
-VOLUME MIXER 1.2.3 — PERSONAL MAC BUILD
+VOLUME MIXER 1.3 — PERSONAL MAC BUILD
 
 INSTALL
 1. Drag Volume Mixer into the Applications folder beside it.
@@ -14,7 +14,7 @@ Pause control and Quit restore each app's original volume and output.
 UPDATING
 Quit the old Volume Mixer from its gear menu, then drag the new copy to the same
 Applications folder and choose Replace. Open the new installed app. Your saved
-volumes and output choices are preserved. The gear menu shows Version 1.2.3.
+volumes and output choices are preserved. The gear menu shows Version 1.3.
 Idle apps retain volume control after their rows disappear. Slider dragging is
 smoother, temporary discovery errors preserve healthy routes, and large audio
 backlogs recover with a short crossfade. Error rows now have a visible Retry button.

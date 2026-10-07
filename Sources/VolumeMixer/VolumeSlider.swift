@@ -57,9 +57,9 @@ final class KeyboardVolumeSlider: NSSlider {
         }
         let direction: Double = event.keyCode == 123 || event.keyCode == 125 ? -1 : 1
         let step = event.modifierFlags.contains(.shift) ? 0.1 : 0.01
-        editingChanged?(true)
+        // Key repeats are discrete actions. Let the engine debounce their saves;
+        // only a mouse drag has an editing session that flushes when it ends.
         doubleValue = min(maxValue, max(minValue, doubleValue + direction * step))
         sendAction(action, to: target)
-        editingChanged?(false)
     }
 }

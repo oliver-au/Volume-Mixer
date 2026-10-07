@@ -14,9 +14,8 @@ struct VolumeMixerMain {
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: Preferences.bundleID)
                 .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
             for app in apps { app.terminate() }
-            let deadline = Date().addingTimeInterval(12)
-            while apps.contains(where: { !$0.isTerminated }) && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-            exit(apps.contains(where: { !$0.isTerminated }) ? 1 : 0)
+            let terminated = ApplicationTermination.wait(timeout: 12) { apps.allSatisfy(\.isTerminated) }
+            exit(terminated ? 0 : 1)
         }
         if CommandLine.arguments.contains("--self-check") {
             let settings = Preferences()

@@ -18,6 +18,9 @@ func require<T>(_ value: T?) throws -> T { guard let value else { throw MissingV
 
 let identity = IdentityTests(), dsp = DSPTests(), prefs = PreferencesTests()
 let tests: [(String, () throws -> Void)] = [
+    ("Keyboard repeat debounces preferences", LifecycleTests().testKeyboardStyleChangesDebouncePersistence),
+    ("Full queue recovers with fresh audio", BridgeTests().testFullQueueReprimesWithFreshAudioAndPreservesGain),
+    ("Concurrent overflow recovery preserves channels", BridgeTests().testConcurrentOverflowRecoveryKeepsChannelsConsistent),
     ("Dragging batches persistence and unity bypass", LifecycleTests().testDraggingDefersSaveAndKeepsUnityUntilFinished),
     ("Pending preferences flush and scoped removal", LifecycleTests().testPendingSaveIsFlushedOnPauseAndCannotReturnAfterResetOrUninstall),
     ("Repeated discovery errors retain route choices", LifecycleTests().testRepeatedDiscoveryFailuresStopControlButRetainRouteChoices),

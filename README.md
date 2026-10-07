@@ -2,7 +2,12 @@
 
 A native macOS menu bar mixer with independent app volume, mute, per-app output
 selection, saved settings, and a clean uninstall action. Personal Apple Silicon
-build for macOS 27. Current build: **1.2.3 (8)**.
+build for macOS 27. Current build: **1.3 (10)**.
+
+Version 1.2.4 debounces arrow-key volume saves, recovers from full audio queues
+using a coordinated reset and short fade-in, and fixes the developer quit command's
+termination wait. Stale audio is discarded without overwriting in-flight samples;
+persistent output failures still restore original playback.
 
 Version 1.2.3 keeps control of idle apps, batches slider persistence, avoids tap
 restarts while dragging around 100%, and preserves healthy routes through brief
@@ -74,8 +79,8 @@ standard and Retina ICNS representations. No external icon service is required.
 
 Quit the running mixer before replacing a build. `scripts/test.sh` uses a native
 test executable, so full Xcode/XCTest is not required. The checks cover sample
-processing, channel layouts, gain ramps, process identity, settings, and scoped
-cleanup. Real device compatibility still requires the live tests in
+processing, channel layouts, gain ramps, process identity, settings, scoped
+cleanup, native arrow-key actions, and termination wait responsiveness. Real device compatibility still requires the live tests in
 `VERIFICATION.md`.
 
 Packaging builds a UDF image in user space and compresses it without mounting
@@ -129,8 +134,13 @@ callbacks.
 For a large backlog, the consumer skips toward the target and crossfades 5 ms of
 old/new samples from preallocated storage. The threshold accommodates ordinary
 packet sizes (at least four target buffers and an additional 250 ms where space
-permits); an overflow beyond capacity still restores original playback. Slow clock
-drift continues to use Varispeed without dropping samples.
+permits). If capture fills the queue while output is stalled, capture drops new
+packets and requests a reset. The playback callback discards the stale queue,
+acknowledges the reset, and re-primes with fresh audio using a 5 ms fade-in. Capture
+never moves the read cursor or overwrites samples still in use. Oversized callbacks
+remain errors; an active output with no delivered frames for three seconds still
+restores original playback. Slow clock drift continues to use Varispeed without
+dropping samples.
 
 Slider events on an existing session apply gain directly and publish cached UI
 state. Settings are saved at the end of dragging or after a 350 ms debounce for

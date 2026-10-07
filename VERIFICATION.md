@@ -1,13 +1,14 @@
 # Volume Mixer verification
 
-The current source is **1.2.3 (8)**, a local Apple Silicon build for macOS 27.
+The current source is **1.3 (10)**, a local Apple Silicon build for macOS 27.
+Version 1.3 changes release metadata only; the validation below records the 1.2.4 build.
 The security hardening in 1.2.1 and a subsequent defect review were checked on
 7 October 2026. The installed app was not replaced or launched during this review.
 
 ## Automated checks
 
 Run `scripts/test.sh` with Apple's Command Line Tools and the macOS 27 SDK.
-The suite covers 60 scenarios:
+The suite covers 63 core scenarios and four isolated native AppKit scenarios:
 
 - Gain, attenuation, mute/unmute ramps, channel mapping and input exclusion.
 - Bounded audio queues, variable callback sizes, ring wraps and concurrent ordering.
@@ -24,11 +25,29 @@ The suite covers 60 scenarios:
   choices and connecting states for newly discovered apps.
 - Repeated 500 ms capture backlogs, crossfades spanning render calls and ring wraps,
   interrupted crossfades, gain/mute preservation and mono/stereo mapping.
+- Full-queue overflow recovery, repeated consumer resets, fresh-audio fade-in,
+  gain/mute preservation, and concurrent stereo integrity through overflows.
+- Keyboard-repeat save debouncing, native arrow/Shift-arrow actions and bounds,
+  delayed termination events, immediate completion and bounded run-loop waits.
 - Output symbols from terminal/transport metadata and lifetime-safe idle retention.
 - Apple-engine offline conversion, mono/anti-alias behavior, independent gain/mute
   and a ten-minute simulated clock-drift run when Audio Units are available.
 
-The final 1.2.3 run had **60 passes, no skips and no failed assertions**. It ran as
+The 1.2.4 run passed **all 63 core and four native AppKit scenarios**, with no
+skips or failed assertions. The same 63 core scenarios passed under
+AddressSanitizer with no memory reports. A separate C capture/render stress probe
+passed under ThreadSanitizer with zero race reports, zero invalid stereo frames,
+and successful playback after repeated queue overflows. Clang static analysis
+reported zero diagnostics. The native checks instantiate the production slider
+and quit-wait helper without displaying windows or terminating any running app.
+
+The full-queue regressions failed with 90 assertions against the old processor
+before the fix. The original keyboard path was separately reproduced as 20
+keypresses causing 20 preference writes; the new native test checks that key
+repeats emit volume actions without drag-end callbacks, and the engine regression
+checks that the repeat burst saves only once.
+
+The earlier final 1.2.3 run had **60 passes, no skips and no failed assertions**. It ran as
 the ordinary user with access to Apple's Audio Unit registry, without administrator
 rights. The initial restricted run passed 56 scenarios and skipped four because
 it could not resolve Audio Units; that run also verified the unavailable-component
@@ -94,6 +113,34 @@ this review. The existing ad-hoc signing/public-distribution limitation remains.
 
 Reviewed discovery and stable identity, control lifecycle, audio buffers and
 conversion, persistence, UI state, uninstall boundaries and release packaging.
+
+### Review fixes in 1.2.4
+
+- Arrow-key actions use the existing 350 ms save debounce. Mouse drags retain
+  their end-of-drag flush; pause, sleep and shutdown still flush pending changes.
+- Capture owns the write cursor and playback owns the read cursor. On overflow,
+  capture sets an atomic reset request and drops incoming packets until playback
+  has discarded the stale queue and acknowledged the reset. Playback re-primes
+  from fresh samples and fades in over 5 ms. The request/acknowledgement ordering
+  prevents either callback from overwriting in-flight samples, and capture reads
+  the read cursor only after observing the acknowledgement. No allocation, locks,
+  waiting, logging or file operations were added to the callbacks.
+- Oversized buffers remain errors. The existing three-second stalled-output
+  watchdog and tests remain in place; recovery cannot keep an unresponsive output
+  controlling an app indefinitely. Actual Bluetooth stall/reconnect listening
+  checks remain outstanding.
+- The developer quit helper pumps the main run loop and uses a monotonic timeout,
+  allowing NSRunningApplication termination state to update during its 12-second
+  wait. Tests use timer-driven fake completion; the installed mixer was not quit.
+- The redundant minimum of already-equal frame counts is now a direct assignment.
+
+The 1.2.4 app and installer were built and signature-checked. The versioned image
+was mounted read-only; its app and a disposable copied app passed strict signature
+verification. The mounted executable, version metadata and installation text
+matched the release inputs. Both DMG filenames passed SHA-256 checks. The image
+was ejected and its disposable review directory removed. A scan of 47 tracked
+and new project files found no credential-pattern matches. No app was installed
+or launched, and no macOS settings or administrator privileges were used.
 
 ### Behaviour fixes in 1.2.3
 
